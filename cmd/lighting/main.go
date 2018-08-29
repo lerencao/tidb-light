@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"flag"
-	"github.com/Sirupsen/logrus"
 	"github.com/juju/errors"
+	"github.com/lerencao/tidb-light/server"
 	"github.com/lerencao/tidb-light/utils"
 	"github.com/pingcap/kvproto/pkg/import_kvpb"
 	"github.com/satori/go.uuid"
+	"github.com/sirupsen/logrus"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -36,7 +38,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	importerClient, err := NewImportClient(clientConn, uuids.Bytes())
+	importerClient := server.NewImportClient(clientConn, uuids.Bytes())
 	if err != nil {
 		logrus.Errorf("fail to get importer client, err: %s\n", err)
 		os.Exit(1)
@@ -48,26 +50,40 @@ func main() {
 	err = importerClient.OpenEngine(ctx)
 	if err != nil {
 		logrus.Errorf("fail to open engine, err: %s\n", err)
-		os.Exit(1)
+		if strings.Contains(err.Error(), "FileExists") {
+			logrus.Warnf("engine %s exists, cleanup now", importerClient.EngineId())
+			err = importerClient.CleanupEngine(ctx)
+		}
+		if err != nil {
+			logrus.Errorf("fail to open engine, err: %s\n", err)
+			os.Exit(1)
+		}
 	}
 
-	err = importerClient.WriteEngine(ctx, &import_kvpb.WriteBatch{
-		CommitTs: uint64(time.Now().Unix()),
-		Mutations: []*import_kvpb.Mutation{
-			{
-				Key:   []byte(cfg.Key),
-				Value: []byte(cfg.Value),
-			},
-		},
-	})
-	if err != nil {
-		logrus.Errorf("fail to write data, err: %s\n", err)
-		os.Exit(1)
-	}
+	engineWriter := importerClient.NewEngineWriter()
+	engineWriter.Open()
 
-	err = importerClient.Close(ctx)
-	if err != nil {
-		logrus.Errorf("fail to close engine, err: %s\n", err)
-		os.Exit(1)
+	mutations := make([]*import_kvpb.Mutation, 0, cfg.BatchSize)
+	for i := uint64(0); i < cfg.KeyNum; i++ {
+		id, _ := uuid.NewV4()
+		mutations = append(mutations, &import_kvpb.Mutation{
+			Op:    import_kvpb.Mutation_Put,
+			Key:   id.Bytes(),
+			Value: id.Bytes(),
+		})
+		if len(mutations) >= int(cfg.BatchSize) {
+			start := time.Now()
+			err = engineWriter.WriteEngine(ctx, &import_kvpb.WriteBatch{
+				CommitTs:  uint64(time.Now().Unix()),
+				Mutations: mutations,
+			})
+			if err != nil {
+				logrus.Errorf("fail to write data, err: %s\n", err)
+				os.Exit(1)
+			}
+			logrus.Infof("Write use %v", time.Now().Sub(start))
+			mutations = mutations[:0]
+		}
 	}
+	engineWriter.Close()
 }

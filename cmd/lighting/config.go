@@ -13,6 +13,8 @@ func newConfig() *config {
 	cfg.FlagSet.StringVar(&cfg.SessionId, "session-id", "", "session id")
 	cfg.FlagSet.StringVar(&cfg.Key, "key", "", "key")
 	cfg.FlagSet.StringVar(&cfg.Value, "value", "", "value")
+	cfg.FlagSet.Uint64Var(&cfg.KeyNum, "key-num", 100000, "numbers of keys to insert")
+	cfg.FlagSet.UintVar(&cfg.BatchSize, "batch-size", 1000, "batch size of on write")
 
 	cfg.FlagSet.StringVar(&cfg.configFile, "config", "", "toml config file path")
 	// cfg.FlagSet.StringVar(&cfg.StoreCfg.Path, "store", "", "pd path")
@@ -26,6 +28,8 @@ type config struct {
 	SessionId    string `toml:"session-id" json:"session_id"`
 	Key          string `toml:"key" json:"key"`
 	Value        string `toml:"value" json:"value"`
+	KeyNum       uint64 `toml:"key-num" json:"key_num"`
+	BatchSize    uint   `toml:"batch-size" json:"batch_size"`
 	configFile   string
 }
 
