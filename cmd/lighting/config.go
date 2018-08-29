@@ -9,6 +9,8 @@ import (
 func newConfig() *config {
 	cfg := &config{}
 	cfg.FlagSet = flag.NewFlagSet("light", flag.ContinueOnError)
+
+	cfg.FlagSet.StringVar(&cfg.Addr, "addr", "localhost:20280", "listening addr")
 	cfg.FlagSet.StringVar(&cfg.ImporterAddr, "importer-addr", "", "importer listen address")
 	cfg.FlagSet.StringVar(&cfg.SessionId, "session-id", "", "session id")
 	cfg.FlagSet.StringVar(&cfg.Key, "key", "", "key")
@@ -23,6 +25,7 @@ func newConfig() *config {
 
 type config struct {
 	*flag.FlagSet `json:"-"`
+	Addr          string `toml:"addr" json:"addr"`
 	// StoreCfg      storeConfig `toml:"store-cfg" json:"store_cfg"`
 	ImporterAddr string `toml:"importer-addr" json:"importer_addr"`
 	SessionId    string `toml:"session-id" json:"session_id"`
