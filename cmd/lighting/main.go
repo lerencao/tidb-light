@@ -6,6 +6,7 @@ import (
 	"github.com/lerencao/tidb-light/server"
 	"github.com/sirupsen/logrus"
 	"os"
+	"sync"
 )
 
 func main() {
@@ -20,11 +21,26 @@ func main() {
 		os.Exit(2)
 	}
 
-	server := server.NewServer(cfg.ImporterAddr)
-	if err := server.Start(cfg.Addr); err != nil {
-		logrus.Fatalf("fail to start server, error: %v", err)
-		os.Exit(2)
+	server, err := server.NewServer(cfg.ImporterAddr)
+	if err != nil {
+		logrus.Errorf("fail to create server, err: %v", err)
+		os.Exit(1)
 	}
+
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+	go func() {
+		server.Start(cfg.Addr)
+		wg.Done()
+	}()
+	wg.Wait()
+
+	err = server.Close()
+
+	if err != nil {
+		logrus.Errorf("fail to close server, err: %v", err)
+	}
+
 }
 
 // func main() {

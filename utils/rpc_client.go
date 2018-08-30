@@ -3,8 +3,7 @@ package utils
 import (
 	"github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/juju/errors"
-	// "github.com/pingcap/tidb/store/tikv/tikvrpc"
-	// "github.com/pingcap/tidb/terror"
+
 	"github.com/sirupsen/logrus"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
@@ -183,10 +182,10 @@ func (a *connArray) Close() {
 	for i, c := range a.v {
 		if c != nil {
 			err := c.Close()
-			logrus.Error(errors.Trace(err))
-			// terror.Log(errors.Trace(err))
+			if err != nil {
+				logrus.Error(errors.Trace(err))
+			}
 			a.v[i] = nil
 		}
 	}
-	// close(a.streamTimeout)
 }

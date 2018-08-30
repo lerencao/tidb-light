@@ -4,7 +4,6 @@ import (
 	"context"
 	"github.com/juju/errors"
 	"github.com/pingcap/kvproto/pkg/import_kvpb"
-	"github.com/satori/go.uuid"
 	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"sync"
@@ -13,69 +12,8 @@ import (
 
 var (
 	// errClosing is returned when request is canceled when client is closing.
-	errClosing = errors.New("[importer] closing")
+	errClosing = errors.New("[writer] closing")
 )
-
-type ImporterClient struct {
-	conn   *grpc.ClientConn
-	client import_kvpb.ImportKVClient
-	uuid   []byte
-
-	ctx    context.Context
-	cancel context.CancelFunc
-}
-
-func NewImportClient(conn *grpc.ClientConn, uuid []byte) *ImporterClient {
-	ctx, cancel := context.WithCancel(context.Background())
-	importer := &ImporterClient{
-		conn:   conn,
-		client: import_kvpb.NewImportKVClient(conn),
-		uuid:   uuid,
-
-		ctx:    ctx,
-		cancel: cancel,
-	}
-
-	return importer
-}
-
-func (c *ImporterClient) EngineId() string {
-	id, _ := uuid.FromBytes(c.uuid)
-	return id.String()
-}
-
-func (c *ImporterClient) NewEngineWriter() *EngineWriter {
-	ctx, cancel := context.WithCancel(c.ctx)
-	writer := &EngineWriter{
-		engine: c,
-		ctx:    ctx,
-		cancel: cancel,
-
-		wg:          &sync.WaitGroup{},
-		requestChan: make(chan *writeReq, 100000),
-	}
-
-	return writer
-}
-
-func (c *ImporterClient) OpenEngine(ctx context.Context) error {
-	req := &import_kvpb.OpenEngineRequest{Uuid: c.uuid}
-	_, err := c.client.OpenEngine(ctx, req)
-
-	return err
-}
-
-func (c *ImporterClient) CloseEngine(ctx context.Context) error {
-	req := &import_kvpb.CloseEngineRequest{Uuid: c.uuid}
-	_, err := c.client.CloseEngine(ctx, req)
-	return err
-}
-
-func (c *ImporterClient) CleanupEngine(ctx context.Context) error {
-	req := &import_kvpb.CleanupEngineRequest{Uuid: c.uuid}
-	_, err := c.client.CleanupEngine(ctx, req)
-	return err
-}
 
 type writeReq struct {
 	mutation *import_kvpb.WriteBatch
@@ -83,10 +21,25 @@ type writeReq struct {
 	done     chan error
 }
 
+func NewEngineWriter(grpcConn *grpc.ClientConn, engineId []byte) *EngineWriter {
+	ctx, cancel := context.WithCancel(context.Background())
+	writer := &EngineWriter{
+		client:   import_kvpb.NewImportKVClient(grpcConn),
+		engineId: engineId,
+		ctx:      ctx,
+		cancel:   cancel,
+
+		wg:          &sync.WaitGroup{},
+		requestChan: make(chan *writeReq, 100000),
+	}
+	return writer
+}
+
 type EngineWriter struct {
-	engine *ImporterClient
-	ctx    context.Context
-	cancel context.CancelFunc
+	client   import_kvpb.ImportKVClient
+	engineId []byte
+	ctx      context.Context
+	cancel   context.CancelFunc
 
 	wg          *sync.WaitGroup
 	requestChan chan *writeReq
@@ -135,10 +88,10 @@ func (c *EngineWriter) reqHandleLoop(loopCtx context.Context) {
 		if writeStream == nil {
 			var streamCtx context.Context
 			streamCtx, streamCancel = context.WithCancel(c.ctx)
-			writeStream, err = c.engine.client.WriteEngine(streamCtx)
+			writeStream, err = c.client.WriteEngine(streamCtx)
 			logrus.Infof("create write steam")
 			if err == nil {
-				err = initialSend(writeStream, c.engine.uuid)
+				err = initialSend(writeStream, c.engineId)
 			}
 			if err != nil {
 				logrus.Errorf("[importer_writer] create write stream error: %v", err)
@@ -202,6 +155,7 @@ func (c *EngineWriter) failWriteReqs(err error) {
 
 // client send stream header
 func initialSend(stream import_kvpb.ImportKV_WriteEngineClient, uuid []byte) error {
+	stream.CloseAndRecv()
 	return stream.Send(&import_kvpb.WriteEngineRequest{
 		Chunk: &import_kvpb.WriteEngineRequest_Head{
 			Head: &import_kvpb.WriteHead{
@@ -221,11 +175,10 @@ func closeWriteStream(stream import_kvpb.ImportKV_WriteEngineClient) error {
 	}
 	writeResp, err := stream.CloseAndRecv()
 	if err != nil {
-		return err
+		return errors.Trace(err)
 	}
 	if writeResp.GetError() == nil {
 		return nil
 	}
-
-	return errors.Errorf("%v", writeResp.GetError().GetEngineNotFound())
+	return errors.Errorf("engine not found: %v", writeResp.GetError().GetEngineNotFound().GetUuid())
 }

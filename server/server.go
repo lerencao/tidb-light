@@ -5,12 +5,15 @@ import (
 	"github.com/juju/errors"
 	"github.com/kataras/iris"
 	"github.com/lerencao/tidb-light/utils"
-	"github.com/pingcap/kvproto/pkg/import_kvpb"
-	"github.com/pingcap/tidb/util/kvencoder"
+	"github.com/pingcap/kvproto/pkg/import_sstpb"
 	"github.com/satori/go.uuid"
 	"github.com/sirupsen/logrus"
-	"time"
 )
+
+type KvImporter interface {
+	GetImportClient() (*KvImportClient, error)
+	GetImportWriter(engineid []byte) (*EngineWriter, error)
+}
 
 type Server struct {
 	app *iris.Application
@@ -19,155 +22,192 @@ type Server struct {
 
 	tikvImporterAddr string
 
-	sessions map[string]*ImportSession
+	sessionManager *SessionManager
 }
 
-func NewServer(tikvImporterAddr string) *Server {
+func NewServer(tikvImporterAddr string) (*Server, error) {
+	rpcClient := utils.NewRPCClient()
+	// Check tikv importer is connectable
+	if _, err := rpcClient.GetConn(tikvImporterAddr); err != nil {
+		rpcClient.Close()
+		return nil, errors.Trace(err)
+	}
+
 	app := iris.Default()
 	server := &Server{
 		tikvImporterAddr: tikvImporterAddr,
 		app:              app,
-		rpcClient:        utils.NewRPCClient(),
-		sessions:         make(map[string]*ImportSession),
+		rpcClient:        rpcClient,
+		sessionManager: &SessionManager{
+			sessions: make(map[string]*WriteSession, 10),
+		},
 	}
+
+	server.sessionManager.kvimporter = server
+
 	server.Init()
-	return server
+	return server, nil
 }
 
 func (s *Server) Start(addr string) error {
-	// Check tikv importer is connectable
-	if _, err := s.rpcClient.GetConn(s.tikvImporterAddr); err != nil {
-		return errors.Trace(err)
-	}
 	return s.app.Run(iris.Addr(addr))
 }
 
-type ImportSession struct {
-	importer *ImporterClient
-	encoder  kvenc.KvEncoder
-
-	writer *EngineWriter
+func (s *Server) Close() error {
+	s.sessionManager.Close()
+	return s.rpcClient.Close()
 }
 
-func (s *ImportSession) Write(ctx context.Context, sqls []string, tableid int64) error {
-	kvs := make([]*import_kvpb.Mutation, 0, 100)
-	for _, sql := range sqls {
-		kvPairs, affectedRows, err := s.encoder.Encode(sql, tableid)
-		if err != nil {
-			return errors.Trace(err)
-		}
-		if affectedRows != uint64(len(sqls)) {
-			logrus.Warnf("affectedRows %d is not equal to incoming sql size %d", affectedRows, len(sqls))
-		}
+// for _, ddl := range initData.Ddls {
+// err := encoder.ExecDDLSQL(ddl)
+// if err != nil {
+// writeError(httpctx, 500, err)
+// return
+// }
+// }
 
-		for _, pair := range kvPairs {
-			kvs = append(kvs, &import_kvpb.Mutation{
-				Op:    import_kvpb.Mutation_Put,
-				Key:   pair.Key,
-				Value: pair.Val,
-			})
-		}
-	}
-
-	if s.writer == nil {
-		s.writer = s.importer.NewEngineWriter()
-		s.writer.Open()
-	}
-	wb := &import_kvpb.WriteBatch{
-		CommitTs:  uint64(time.Now().UnixNano()),
-		Mutations: kvs,
-	}
-	return s.writer.WriteEngine(ctx, wb)
-}
-
-func (s *ImportSession) Close(ctx context.Context) error {
-	err1 := s.encoder.Close()
-	if s.writer != nil {
-		s.writer.Close()
-	}
-
-	if err := s.importer.CloseEngine(ctx); err != nil {
-		if err1 != nil {
-			return errors.Wrap(err1, err)
-		}
-
-		return errors.Trace(err)
-	}
-
-	return nil
-}
-
-type CreateSessionData struct {
-	Uuid string   `json:"uuid"`
-	Ddls []string `json:"ddls"`
-}
-
-// CreateSession create a session for write sql
-func (s *Server) CreateSession(httpctx iris.Context) {
-	initData := CreateSessionData{}
-	if err := httpctx.ReadJSON(&initData); err != nil {
-		httpctx.StatusCode(400)
-		httpctx.WriteString(err.Error())
-		return
-	}
-
-	thisUuid, err := uuid.FromString(initData.Uuid)
-	sessionId := thisUuid.Bytes()
+func (s *Server) OpenEngine(httpctx iris.Context) {
+	engineid := httpctx.Params().Get("engineid")
+	engineId, err := uuid.FromString(engineid)
 	if err != nil {
 		writeError(httpctx, 400, err)
 		return
 	}
 
-	if _, ok := s.sessions[initData.Uuid]; ok {
-		writeError(httpctx, 400, errors.Errorf("session %s already exists", initData.Uuid))
-		return
-	}
-
-	grpcConn, err := s.rpcClient.GetConn(s.tikvImporterAddr)
+	importClient, err := s.GetImportClient()
 	if err != nil {
 		writeError(httpctx, 500, err)
 		return
 	}
 
-	importerClient := NewImportClient(grpcConn, sessionId)
-	ctx := context.Background()
-	err = importerClient.OpenEngine(ctx)
-	if err != nil {
-		writeError(httpctx, 500, err)
-	}
+	ctx, cancel := context.WithCancel(context.Background())
+	httpctx.OnConnectionClose(func() {
+		cancel()
+	})
 
-	encoder, err := kvenc.New("test", kvenc.NewAllocator())
+	err = importClient.OpenEngine(ctx, engineId.Bytes())
 	if err != nil {
 		writeError(httpctx, 500, err)
 		return
 	}
-	for _, ddl := range initData.Ddls {
-		err := encoder.ExecDDLSQL(ddl)
-		if err != nil {
-			writeError(httpctx, 500, err)
-			return
-		}
-	}
-
-	session := &ImportSession{
-		importer: importerClient,
-		encoder:  encoder,
-	}
-
-	s.sessions[initData.Uuid] = session
 
 	httpctx.StatusCode(200)
 }
 
+func (s *Server) CloseEngine(httpctx iris.Context) {
+	engineid := httpctx.Params().Get("engineid")
+	engineId, err := uuid.FromString(engineid)
+	if err != nil {
+		writeError(httpctx, 400, err)
+		return
+	}
+
+	importClient, err := s.GetImportClient()
+	if err != nil {
+		writeError(httpctx, 500, err)
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	httpctx.OnConnectionClose(func() {
+		cancel()
+	})
+
+	err = importClient.CloseEngine(ctx, engineId.Bytes())
+	if err != nil {
+		writeError(httpctx, 500, err)
+		return
+	}
+
+	httpctx.StatusCode(200)
+}
+func (s *Server) CleanupEngine(httpctx iris.Context) {
+	engineid := httpctx.Params().Get("engineid")
+	engineId, err := uuid.FromString(engineid)
+	if err != nil {
+		writeError(httpctx, 400, err)
+		return
+	}
+
+	importClient, err := s.GetImportClient()
+	if err != nil {
+		writeError(httpctx, 500, err)
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	httpctx.OnConnectionClose(func() {
+		cancel()
+	})
+
+	err = importClient.CleanupEngine(ctx, engineId.Bytes())
+	if err != nil {
+		writeError(httpctx, 500, err)
+		return
+	}
+
+	httpctx.StatusCode(200)
+}
+
+type OpenSessionParam struct {
+	EngineId   string `json:"engine_id"`
+	SchemaName string `json:"schema_name"`
+	TableName  string `json:"table_name"`
+	TableId    int64  `json:"table_id"`
+	DDL        string `json:"ddl"`
+}
+
+func (s *Server) OpenSession(httpctx iris.Context) {
+	sessionid := httpctx.Params().Get("sessionid")
+
+	param := &OpenSessionParam{}
+	err := httpctx.ReadJSON(param)
+	if err != nil {
+		writeError(httpctx, 400, err)
+		return
+	}
+
+	engineId, err := uuid.FromString(param.EngineId)
+	if err != nil {
+		writeError(httpctx, 400, err)
+		return
+	}
+
+	_, err = s.sessionManager.OpenSession(
+		sessionid, engineId.Bytes(),
+		param.SchemaName, param.TableName, param.TableId, param.DDL)
+	if err != nil {
+		writeError(httpctx, 500, err)
+		return
+	}
+
+	httpctx.StatusCode(200)
+}
+
+func (s *Server) SessionInfo(httpctx iris.Context) {
+	sessionid := httpctx.Params().Get("sessionid")
+	session := s.sessionManager.GetSession(sessionid)
+	if session == nil {
+		writeError(httpctx, 400, errors.Errorf("session %s not exists", sessionid))
+		return
+	}
+
+	httpctx.JSON(map[string]interface{}{
+		"schema_name": session.schemaName,
+		"table_name":  session.tableName,
+		"table_id":    session.tableid,
+		"ddl":         session.ddl,
+	})
+}
+
 type SessionWriteParam struct {
-	TableId int64    `json:"table_id"`
-	Sqls    []string `json:"sqls"`
+	Sqls []string `json:"sqls"`
 }
 
 func (s *Server) SessionWrite(httpctx iris.Context) {
 	sessionid := httpctx.Params().Get("sessionid")
-	session, ok := s.sessions[sessionid]
-	if !ok {
+	session := s.sessionManager.GetSession(sessionid)
+	if session == nil {
 		writeError(httpctx, 400, errors.Errorf("session %s not exists", sessionid))
 		return
 	}
@@ -179,26 +219,148 @@ func (s *Server) SessionWrite(httpctx iris.Context) {
 		return
 	}
 
-	session.Write(context.Background(), writeData.Sqls, writeData.TableId)
-}
+	rows, err := session.Write(context.Background(), writeData.Sqls)
 
-func (s *Server) CloseSession(httpctx iris.Context) {
-
-	sessionid := httpctx.Params().Get("sessionid")
-	session, ok := s.sessions[sessionid]
-	if !ok {
-		writeError(httpctx, 400, errors.Errorf("session %s not exists", sessionid))
+	if err != nil {
+		writeError(httpctx, 400, err)
 		return
 	}
 
-	session.Close(context.Background())
-	delete(s.sessions, sessionid)
+	httpctx.JSON(map[string]uint64{
+		"rows": rows,
+	})
+}
+
+func (s *Server) SessionClose(httpctx iris.Context) {
+	sessionid := httpctx.Params().Get("sessionid")
+	err := s.sessionManager.CloseSession(sessionid)
+	if err != nil {
+		writeError(httpctx, 500, err)
+	}
+}
+
+func (s *Server) GetImportClient() (*KvImportClient, error) {
+	conn, err := s.rpcClient.GetConn(s.tikvImporterAddr)
+	if err != nil {
+		return nil, err
+	}
+	return NewKvImportClient(conn), nil
+}
+
+func (s *Server) GetImportWriter(engineId []byte) (*EngineWriter, error) {
+	conn, err := s.rpcClient.GetConn(s.tikvImporterAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	return NewEngineWriter(conn, engineId), nil
+}
+
+type SwitchPdMode struct {
+	PdAddr string                  `json:"pd_addr"`
+	Mode   import_sstpb.SwitchMode `json:"mode"`
+}
+
+func (s *Server) SwitchPdMode(httpctx iris.Context) {
+	param := &SwitchPdMode{}
+	err := httpctx.ReadJSON(param)
+	if err != nil {
+		writeError(httpctx, 400, err)
+		return
+	}
+
+	c, err := s.GetImportClient()
+	if err != nil {
+		writeError(httpctx, 500, err)
+		return
+	}
+	err = c.SwitchMode(context.Background(), param.PdAddr, param.Mode)
+	if err != nil {
+		writeError(httpctx, 500, err)
+		return
+	}
+}
+
+type ImportEngineParam struct {
+	PdAddr string `json:"pd_addr"`
+}
+
+func (s *Server) ImportEngine(httpctx iris.Context) {
+	engineid := httpctx.Params().Get("engineid")
+	engineId, err := uuid.FromString(engineid)
+	if err != nil {
+		writeError(httpctx, 400, err)
+		return
+	}
+
+	param := &ImportEngineParam{}
+	err = httpctx.ReadJSON(param)
+	if err != nil {
+		writeError(httpctx, 400, err)
+		return
+	}
+
+	importClient, err := s.GetImportClient()
+	if err != nil {
+		writeError(httpctx, 500, err)
+		return
+	}
+	err = importClient.ImportEngine(context.Background(), engineId.Bytes(), param.PdAddr)
+	if err != nil {
+		writeError(httpctx, 500, err)
+		return
+	}
+}
+
+type CompactTableParam struct {
+	PdAddr  string `json:"pd_addr"`
+	TableId int64  `json:"table_id"`
+}
+
+func (s *Server) CompactTable(httpctx iris.Context) {
+	param := &CompactTableParam{}
+	err := httpctx.ReadJSON(param)
+	if err != nil {
+		writeError(httpctx, 400, err)
+		return
+	}
+
+	importClient, err := s.GetImportClient()
+	if err != nil {
+		writeError(httpctx, 500, err)
+		return
+	}
+
+	// TODO: gen start/end from tableid
+	req := &import_sstpb.CompactRequest{
+		OutputLevel: -1,
+		Range: &import_sstpb.Range{
+			Start: make([]byte, 0),
+			End:   make([]byte, 0),
+		},
+	}
+	err = importClient.CompactCluster(context.Background(), param.PdAddr, req)
+	if err != nil {
+		writeError(httpctx, 500, err)
+	}
 }
 
 func (s *Server) Init() {
-	s.app.Post("/sql2kv/session", s.CreateSession)
-	s.app.Post("/sql2kv/session/{sessionid}/write", s.SessionWrite)
-	s.app.Post("/sql2kv/session/{sessionid}/close", s.CloseSession)
+
+	// engine api
+	s.app.Post("/sql2kv/engines/{engineid}/open", s.OpenEngine)
+	s.app.Post("/sql2kv/engines/{engineid}/close", s.CloseEngine)
+	s.app.Post("/sql2kv/engines/{engineid}/cleanup", s.CleanupEngine)
+
+	s.app.Post("/sql2kv/engines/{engineid}/import", s.ImportEngine)
+
+	s.app.Post("/sql2kv/import/switch_mode", s.SwitchPdMode)
+	s.app.Post("/sql2kv/import/compact_table", s.CompactTable)
+	// write session
+	s.app.Post("/sql2kv/sessions/{sessionid}/open", s.OpenSession)
+	s.app.Get("/sql2kv/sessions/{sessionid}", s.SessionInfo)
+	s.app.Post("/sql2kv/sessions/{sessionid}/write", s.SessionWrite)
+	s.app.Post("/sql2kv/sessions/{sessionid}/close", s.SessionClose)
 }
 
 func writeError(ctx iris.Context, code int, err error) {
@@ -207,25 +369,4 @@ func writeError(ctx iris.Context, code int, err error) {
 	if e != nil {
 		logrus.Panicf("write error: %v", e)
 	}
-}
-
-type KvTransformer struct {
-	importer  ImporterClient
-	kvencoder kvenc.KvEncoder
-	ddls      []string
-}
-
-func (t *KvTransformer) AddDDL(ddl string) error {
-	if err := t.kvencoder.ExecDDLSQL(ddl); err != nil {
-		return err
-	}
-
-	t.ddls = append(t.ddls, ddl)
-	return nil
-}
-
-func (t *KvTransformer) Transform(sql string, tableid int64) error {
-	t.kvencoder.Encode(sql, tableid)
-	// TODO: impl it
-	return nil
 }
