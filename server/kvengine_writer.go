@@ -155,7 +155,6 @@ func (c *EngineWriter) failWriteReqs(err error) {
 
 // client send stream header
 func initialSend(stream import_kvpb.ImportKV_WriteEngineClient, uuid []byte) error {
-	stream.CloseAndRecv()
 	return stream.Send(&import_kvpb.WriteEngineRequest{
 		Chunk: &import_kvpb.WriteEngineRequest_Head{
 			Head: &import_kvpb.WriteHead{
