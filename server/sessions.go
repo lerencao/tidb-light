@@ -4,10 +4,10 @@ import (
 	"context"
 	"github.com/juju/errors"
 	"github.com/pingcap/kvproto/pkg/import_kvpb"
+	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/util/kvencoder"
 	"github.com/sirupsen/logrus"
 	"sync"
-	"time"
 )
 
 type SessionManager struct {
@@ -94,7 +94,7 @@ type WriteSession struct {
 	writer     *EngineWriter
 }
 
-func (s *WriteSession) Write(ctx context.Context, sqls []string) (uint64, error) {
+func (s *WriteSession) Write(ctx context.Context, sqls []string, commitTs uint64) (uint64, error) {
 	kvs := make([]*import_kvpb.Mutation, 0, 100)
 
 	var rows uint64
@@ -109,6 +109,14 @@ func (s *WriteSession) Write(ctx context.Context, sqls []string) (uint64, error)
 		// }
 
 		for _, pair := range kvPairs {
+			tableID, handle, err := tablecodec.DecodeRecordKey(pair.Key)
+			if err != nil {
+				return 0, err
+			}
+			if tableID != s.tableid {
+				return 0, errors.Errorf("invalid encoded key, table id(%d) should be %d", tableID, s.tableid)
+			}
+			logrus.Infof("encode handle %d", handle)
 			kvs = append(kvs, &import_kvpb.Mutation{
 				Op:    import_kvpb.Mutation_Put,
 				Key:   pair.Key,
@@ -118,7 +126,7 @@ func (s *WriteSession) Write(ctx context.Context, sqls []string) (uint64, error)
 	}
 
 	wb := &import_kvpb.WriteBatch{
-		CommitTs:  uint64(time.Now().UnixNano()),
+		CommitTs:  commitTs,
 		Mutations: kvs,
 	}
 	return rows, s.writer.WriteEngine(ctx, wb)

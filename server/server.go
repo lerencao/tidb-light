@@ -6,6 +6,8 @@ import (
 	"github.com/kataras/iris"
 	"github.com/lerencao/tidb-light/utils"
 	"github.com/pingcap/kvproto/pkg/import_sstpb"
+	"github.com/pingcap/tidb/store/tikv/oracle"
+	"github.com/pingcap/tidb/store/tikv/oracle/oracles"
 	"github.com/satori/go.uuid"
 	"github.com/sirupsen/logrus"
 )
@@ -23,6 +25,8 @@ type Server struct {
 	tikvImporterAddr string
 
 	sessionManager *SessionManager
+
+	oracle oracle.Oracle
 }
 
 func NewServer(tikvImporterAddr string) (*Server, error) {
@@ -41,6 +45,7 @@ func NewServer(tikvImporterAddr string) (*Server, error) {
 		sessionManager: &SessionManager{
 			sessions: make(map[string]*WriteSession, 10),
 		},
+		oracle: oracles.NewLocalOracle(),
 	}
 
 	server.sessionManager.kvimporter = server
@@ -218,8 +223,10 @@ func (s *Server) SessionWrite(httpctx iris.Context) {
 		writeError(httpctx, 400, err)
 		return
 	}
-
-	rows, err := session.Write(context.Background(), writeData.Sqls)
+	ctx := context.Background()
+	// we use local oracle, err is never returned
+	ts, _ := s.oracle.GetTimestamp(ctx)
+	rows, err := session.Write(ctx, writeData.Sqls, ts)
 
 	if err != nil {
 		writeError(httpctx, 400, err)
