@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"github.com/juju/errors"
+	"github.com/lerencao/tidb-light/config"
 	"github.com/lerencao/tidb-light/server"
 	"github.com/sirupsen/logrus"
 	"os"
@@ -10,7 +11,7 @@ import (
 )
 
 func main() {
-	cfg := newConfig()
+	cfg := config.NewConfig()
 	err := cfg.Parse(os.Args[1:])
 	switch errors.Cause(err) {
 	case nil:
@@ -21,7 +22,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	server, err := server.NewServer(cfg.ImporterAddr)
+	server, err := server.NewServer(cfg)
 	if err != nil {
 		logrus.Errorf("fail to create server, err: %v", err)
 		os.Exit(1)

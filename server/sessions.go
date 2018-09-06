@@ -2,18 +2,42 @@ package server
 
 import (
 	"context"
-	"github.com/juju/errors"
+	"database/sql"
+	"fmt"
+	"github.com/lerencao/tidb-light/config"
 	"github.com/pingcap/kvproto/pkg/import_kvpb"
 	"github.com/pingcap/tidb/tablecodec"
 	"github.com/pingcap/tidb/util/kvencoder"
+	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"sync"
 )
 
 type SessionManager struct {
 	sync.RWMutex
+	cfg *config.Config
+
+	db         *sql.DB
 	kvimporter KvImporter
 	sessions   map[string]*WriteSession
+}
+
+func NewSessionManager(cfg *config.Config) (*SessionManager, error) {
+	db, err := OpenDB(cfg.TiDBAddr, cfg.TiDBUser, cfg.TiDBPass)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	return &SessionManager{
+		cfg:      cfg,
+		db:       db,
+		sessions: make(map[string]*WriteSession, 10),
+	}, nil
+}
+
+func OpenDB(tidbAddr, tidbUser, tidbPass string) (*sql.DB, error) {
+	dsn := fmt.Sprintf("%s:%s@tcp(%s)", tidbUser, tidbPass, tidbAddr)
+	return sql.Open("mysql", dsn)
 }
 
 func (s *SessionManager) Close() {
@@ -45,11 +69,21 @@ func (s *SessionManager) CloseSession(sessionid string) error {
 	return nil
 }
 
-func (s *SessionManager) OpenSession(sessionid string, engineid []byte, schemaName, tableName string, tableid int64, ddl string) (*WriteSession, error) {
+func (s *SessionManager) OpenSession(sessionid string, engineid []byte, schemaName, tableName string) (*WriteSession, error) {
 	s.Lock()
 	defer s.Unlock()
 	if session, ok := s.sessions[sessionid]; ok {
 		return session, nil
+	}
+
+	tableid, err := TableId(s.cfg.TiDBHttpAddr, schemaName, tableName)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	ddl, err := TableDDL(s.db, schemaName, tableName)
+	if err != nil {
+		return nil, errors.WithStack(err)
 	}
 
 	encoder, err := kvenc.New(schemaName, kvenc.NewAllocator())
@@ -101,7 +135,7 @@ func (s *WriteSession) Write(ctx context.Context, sqls []string, commitTs uint64
 	for _, sql := range sqls {
 		kvPairs, affectedRows, err := s.encoder.Encode(sql, s.tableid)
 		if err != nil {
-			return 0, errors.Trace(err)
+			return 0, errors.WithStack(err)
 		}
 		rows = rows + affectedRows
 		// if affectedRows != uint64(len(sqls)) {

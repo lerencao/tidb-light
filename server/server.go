@@ -2,12 +2,15 @@ package server
 
 import (
 	"context"
-	"github.com/juju/errors"
+	"database/sql"
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/kataras/iris"
+	"github.com/lerencao/tidb-light/config"
 	"github.com/lerencao/tidb-light/utils"
 	"github.com/pingcap/kvproto/pkg/import_sstpb"
 	"github.com/pingcap/tidb/store/tikv/oracle"
 	"github.com/pingcap/tidb/store/tikv/oracle/oracles"
+	"github.com/pkg/errors"
 	"github.com/satori/go.uuid"
 	"github.com/sirupsen/logrus"
 )
@@ -19,33 +22,33 @@ type KvImporter interface {
 
 type Server struct {
 	app *iris.Application
+	cfg *config.Config
 
 	rpcClient *utils.RpcClient
 
-	tikvImporterAddr string
-
 	sessionManager *SessionManager
-
-	oracle oracle.Oracle
+	oracle         oracle.Oracle
 }
 
-func NewServer(tikvImporterAddr string) (*Server, error) {
+func NewServer(cfg *config.Config) (*Server, error) {
 	rpcClient := utils.NewRPCClient()
 	// Check tikv importer is connectable
-	if _, err := rpcClient.GetConn(tikvImporterAddr); err != nil {
+	if _, err := rpcClient.GetConn(cfg.ImporterAddr); err != nil {
 		rpcClient.Close()
-		return nil, errors.Trace(err)
+		return nil, errors.WithStack(err)
 	}
 
 	app := iris.Default()
+	sm, err := NewSessionManager(cfg)
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
 	server := &Server{
-		tikvImporterAddr: tikvImporterAddr,
-		app:              app,
-		rpcClient:        rpcClient,
-		sessionManager: &SessionManager{
-			sessions: make(map[string]*WriteSession, 10),
-		},
-		oracle: oracles.NewLocalOracle(),
+		cfg:            cfg,
+		app:            app,
+		rpcClient:      rpcClient,
+		sessionManager: sm,
+		oracle:         oracles.NewLocalOracle(),
 	}
 
 	server.sessionManager.kvimporter = server
@@ -55,6 +58,8 @@ func NewServer(tikvImporterAddr string) (*Server, error) {
 }
 
 func (s *Server) Start(addr string) error {
+
+	sql.Open("mysql", "")
 	return s.app.Run(iris.Addr(addr))
 }
 
@@ -158,8 +163,6 @@ type OpenSessionParam struct {
 	EngineId   string `json:"engine_id"`
 	SchemaName string `json:"schema_name"`
 	TableName  string `json:"table_name"`
-	TableId    int64  `json:"table_id"`
-	DDL        string `json:"ddl"`
 }
 
 func (s *Server) OpenSession(httpctx iris.Context) {
@@ -178,9 +181,7 @@ func (s *Server) OpenSession(httpctx iris.Context) {
 		return
 	}
 
-	_, err = s.sessionManager.OpenSession(
-		sessionid, engineId.Bytes(),
-		param.SchemaName, param.TableName, param.TableId, param.DDL)
+	_, err = s.sessionManager.OpenSession(sessionid, engineId.Bytes(), param.SchemaName, param.TableName)
 	if err != nil {
 		writeError(httpctx, 500, err)
 		return
@@ -247,7 +248,7 @@ func (s *Server) SessionClose(httpctx iris.Context) {
 }
 
 func (s *Server) GetImportClient() (*KvImportClient, error) {
-	conn, err := s.rpcClient.GetConn(s.tikvImporterAddr)
+	conn, err := s.rpcClient.GetConn(s.cfg.ImporterAddr)
 	if err != nil {
 		return nil, err
 	}
@@ -255,7 +256,7 @@ func (s *Server) GetImportClient() (*KvImportClient, error) {
 }
 
 func (s *Server) GetImportWriter(engineId []byte) (*EngineWriter, error) {
-	conn, err := s.rpcClient.GetConn(s.tikvImporterAddr)
+	conn, err := s.rpcClient.GetConn(s.cfg.ImporterAddr)
 	if err != nil {
 		return nil, err
 	}

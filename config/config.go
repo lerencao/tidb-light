@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"flag"
@@ -6,45 +6,41 @@ import (
 	"github.com/juju/errors"
 )
 
-func newConfig() *config {
-	cfg := &config{}
+func NewConfig() *Config {
+	cfg := &Config{}
 	cfg.FlagSet = flag.NewFlagSet("light", flag.ContinueOnError)
 
 	cfg.FlagSet.StringVar(&cfg.Addr, "addr", "localhost:20280", "listening addr")
 	cfg.FlagSet.StringVar(&cfg.ImporterAddr, "importer-addr", "", "importer listen address")
-	cfg.FlagSet.StringVar(&cfg.SessionId, "session-id", "", "session id")
-	cfg.FlagSet.StringVar(&cfg.Key, "key", "", "key")
-	cfg.FlagSet.StringVar(&cfg.Value, "value", "", "value")
-	cfg.FlagSet.Uint64Var(&cfg.KeyNum, "key-num", 100000, "numbers of keys to insert")
-	cfg.FlagSet.UintVar(&cfg.BatchSize, "batch-size", 1000, "batch size of on write")
-
+	cfg.FlagSet.StringVar(&cfg.TiDBAddr, "tidb-addr", "", "tidb tcp addr")
+	cfg.FlagSet.StringVar(&cfg.TiDBUser, "tidb-user", "root", "tidb user")
+	cfg.FlagSet.StringVar(&cfg.TiDBPass, "tidb-password", "root", "tidb password")
+	cfg.FlagSet.StringVar(&cfg.TiDBHttpAddr, "tidb-http-addr", "", "tidb http addr")
 	cfg.FlagSet.StringVar(&cfg.configFile, "config", "", "toml config file path")
 	// cfg.FlagSet.StringVar(&cfg.StoreCfg.Path, "store", "", "pd path")
 	return cfg
 }
 
-type config struct {
+type Config struct {
 	*flag.FlagSet `json:"-"`
 	Addr          string `toml:"addr" json:"addr"`
 	// StoreCfg      storeConfig `toml:"store-cfg" json:"store_cfg"`
 	ImporterAddr string `toml:"importer-addr" json:"importer_addr"`
-	SessionId    string `toml:"session-id" json:"session_id"`
-	Key          string `toml:"key" json:"key"`
-	Value        string `toml:"value" json:"value"`
-	KeyNum       uint64 `toml:"key-num" json:"key_num"`
-	BatchSize    uint   `toml:"batch-size" json:"batch_size"`
+	TiDBAddr     string `toml:"tidb-addr" json:"tidb_addr"`
+	TiDBUser     string `toml:"tidb-user" json:"tidb_user"`
+	TiDBPass     string `toml:"tidb-pass" json:"tidb_pass"`
+	TiDBHttpAddr string `toml:"tidb-http-addr" json:"tidb_http_addr"`
 	configFile   string
 }
 
-func (c *config) String() string {
+func (c *Config) String() string {
 	if c == nil {
 		return "<nil>"
 	}
-
 	return fmt.Sprintf("Config(%v)", *c)
 }
 
-func (c *config) Parse(args []string) error {
+func (c *Config) Parse(args []string) error {
 	err := c.FlagSet.Parse(args)
 	if err != nil {
 		return errors.Trace(err)
