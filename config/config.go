@@ -3,7 +3,8 @@ package config
 import (
 	"flag"
 	"fmt"
-	"github.com/juju/errors"
+	"github.com/BurntSushi/toml"
+	"github.com/pkg/errors"
 )
 
 func NewConfig() *Config {
@@ -43,13 +44,21 @@ func (c *Config) String() string {
 func (c *Config) Parse(args []string) error {
 	err := c.FlagSet.Parse(args)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.WithStack(err)
+	}
+
+	// Load config file if specified.
+	if c.configFile != "" {
+		err = c.configFromFile(c.configFile)
+		if err != nil {
+			return errors.WithStack(err)
+		}
 	}
 
 	// Parse agin to replace with command line options
 	err = c.FlagSet.Parse(args)
 	if err != nil {
-		return errors.Trace(err)
+		return errors.WithStack(err)
 	}
 
 	if len(c.FlagSet.Args()) != 0 {
@@ -59,6 +68,27 @@ func (c *Config) Parse(args []string) error {
 	return nil
 }
 
-// type storeConfig struct {
-// 	Path string `toml:"path" json:"path"`
-// }
+func (c *Config) Validate() error {
+	if c.Addr == "" {
+		return errors.Errorf("addr should not be empty")
+	}
+
+	if c.ImporterAddr == "" {
+		return errors.Errorf("import-addr should not be empty")
+	}
+
+	if c.TiDBHttpAddr == "" {
+		return errors.Errorf("tidb-http-addr should not be empty")
+	}
+
+	if c.TiDBAddr == "" {
+		return errors.Errorf("tidb-addr should not be empty")
+	}
+	return nil
+}
+
+// configFromFile loads config from file.
+func (c *Config) configFromFile(path string) error {
+	_, err := toml.DecodeFile(path, c)
+	return errors.WithStack(err)
+}

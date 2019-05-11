@@ -1,7 +1,7 @@
 module github.com/lerencao/tidb-light
 
 require (
-	github.com/BurntSushi/toml v0.3.0 // indirect
+	github.com/BurntSushi/toml v0.3.0
 	github.com/Joker/jade v0.7.0 // indirect
 	github.com/Shopify/goreferrer v0.0.0-20180807163728-b9777dc9f9cc // indirect
 	github.com/ajg/form v0.0.0-20160822230020-523a5da1a92f // indirect
@@ -36,7 +36,7 @@ require (
 	github.com/google/go-querystring v0.0.0-20170111101155-53e6ce116135 // indirect
 	github.com/gopherjs/gopherjs v0.0.0-20180825215210-0210a2f0f73c // indirect
 	github.com/gorilla/context v1.1.1 // indirect
-	github.com/gorilla/mux v1.6.2 // indirect
+	github.com/gorilla/mux v1.6.2
 	github.com/gorilla/websocket v1.4.0 // indirect
 	github.com/grpc-ecosystem/go-grpc-middleware v1.0.0 // indirect
 	github.com/grpc-ecosystem/go-grpc-prometheus v1.2.0
@@ -103,8 +103,8 @@ require (
 	github.com/uber/jaeger-client-go v2.14.0+incompatible // indirect
 	github.com/uber/jaeger-lib v1.5.0 // indirect
 	github.com/ugorji/go/codec v0.0.0-20180831062425-e253f1f20942 // indirect
-	github.com/unrolled/render v0.0.0-20180807193321-4206df6ff701 // indirect
-	github.com/urfave/negroni v1.0.0 // indirect
+	github.com/unrolled/render v0.0.0-20180807193321-4206df6ff701
+	github.com/urfave/negroni v1.0.0
 	github.com/xeipuuv/gojsonpointer v0.0.0-20180127040702-4e3ac2762d5f // indirect
 	github.com/xeipuuv/gojsonreference v0.0.0-20180127040603-bd5ef7bd5415 // indirect
 	github.com/xeipuuv/gojsonschema v0.0.0-20180816142147-da425ebb7609 // indirect

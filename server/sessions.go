@@ -22,25 +22,33 @@ type SessionManager struct {
 	sessions   map[string]*WriteSession
 }
 
-func NewSessionManager(cfg *config.Config) (*SessionManager, error) {
-	db, err := OpenDB(cfg.TiDBAddr, cfg.TiDBUser, cfg.TiDBPass)
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
-
+func NewSessionManager(cfg *config.Config) *SessionManager {
 	return &SessionManager{
 		cfg:      cfg,
-		db:       db,
 		sessions: make(map[string]*WriteSession, 10),
-	}, nil
+	}
+}
+func (s *SessionManager) Start(importer KvImporter) error {
+	db, err := OpenDB(s.cfg.TiDBAddr, s.cfg.TiDBUser, s.cfg.TiDBPass)
+	if err != nil {
+		return errors.WithStack(err)
+	}
+	s.db = db
+	s.kvimporter = importer
+	return nil
 }
 
 func OpenDB(tidbAddr, tidbUser, tidbPass string) (*sql.DB, error) {
-	dsn := fmt.Sprintf("%s:%s@tcp(%s)", tidbUser, tidbPass, tidbAddr)
+	dsn := fmt.Sprintf("%s:%s@tcp(%s)/", tidbUser, tidbPass, tidbAddr)
 	return sql.Open("mysql", dsn)
 }
 
 func (s *SessionManager) Close() {
+	defer func() {
+		if err := s.db.Close(); err != nil {
+			logrus.Errorf("fail to close db, error: %v", err)
+		}
+	}()
 	// TODO: return errors
 	var err error
 	for _, session := range s.sessions {

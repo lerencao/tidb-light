@@ -1,13 +1,17 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"github.com/juju/errors"
 	"github.com/lerencao/tidb-light/config"
 	"github.com/lerencao/tidb-light/server"
 	"github.com/sirupsen/logrus"
+	"net/http"
 	"os"
-	"sync"
+	"os/signal"
+	"syscall"
+	"time"
 )
 
 func main() {
@@ -22,22 +26,45 @@ func main() {
 		os.Exit(2)
 	}
 
-	server, err := server.NewServer(cfg)
-	if err != nil {
-		logrus.Errorf("fail to create server, err: %v", err)
-		os.Exit(1)
+	if err = cfg.Validate(); err != nil {
+		logrus.Error(err)
+		os.Exit(2)
 	}
 
-	wg := &sync.WaitGroup{}
-	wg.Add(1)
+	svr := server.NewServer(cfg)
+	if err := svr.Start(); err != nil {
+		logrus.Errorf("fail to create server service, error: %v", err)
+	}
+
+	handler := server.NewHandler(svr)
+	httpServer := &http.Server{
+		Addr:         cfg.Addr,
+		WriteTimeout: 15 * time.Second,
+		ReadTimeout:  15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+		Handler:      handler,
+	}
+
 	go func() {
-		server.Start(cfg.Addr)
-		wg.Done()
+		if err := httpServer.ListenAndServe(); err != nil {
+			if err == http.ErrServerClosed {
+				logrus.Infof("Server closed, %v", err)
+			} else {
+				logrus.Error(err)
+			}
+		}
 	}()
-	wg.Wait()
 
-	err = server.Close()
+	c := make(chan os.Signal, 1)
+	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
+	<-c
 
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	httpServer.Shutdown(ctx)
+
+	err = svr.Close()
 	if err != nil {
 		logrus.Errorf("fail to close server, err: %v", err)
 	}
